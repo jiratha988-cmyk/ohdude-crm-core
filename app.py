@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 import json
 import os
-from datetime import datetime
+from datetime import datetime, date
 
 app = Flask(__name__)
 
@@ -17,9 +17,18 @@ OA_MAP = {
     "Uc52c930ca257b5ef418c74874fecc5de": "OH DUDE"
 }
 
-# ================= TEMP CRM MEMORY =================
+# ================= TEMP MEMORY =================
 
-CRM_USERS = {}
+CALL_LEADS = {}
+MESSAGE_LOG = []
+
+# ================= HELPERS =================
+
+def now_iso():
+    return datetime.now().isoformat(timespec="seconds")
+
+def today_str():
+    return date.today().isoformat()
 
 # ================= HOME =================
 
@@ -36,13 +45,74 @@ def health():
         "service": "ohdude-crm-core"
     })
 
-# ================= CRM USERS =================
+# ================= CALL LEADS =================
 
-@app.route("/crm/users", methods=["GET"])
-def crm_users():
+@app.route("/call-leads", methods=["GET"])
+def call_leads():
     return jsonify({
-        "total_users": len(CRM_USERS),
-        "users": list(CRM_USERS.values())
+        "total_leads": len(CALL_LEADS),
+        "leads": list(CALL_LEADS.values())
+    })
+
+# ================= DAILY ADDS DASHBOARD =================
+
+@app.route("/dashboard/daily-adds", methods=["GET"])
+def daily_adds():
+
+    dashboard = {}
+
+    for lead in CALL_LEADS.values():
+        add_date = lead.get("add_date")
+        channel_id = lead.get("channel_id")
+        channel_name = lead.get("channel_name", "UNKNOWN_OA")
+
+        key = f"{add_date}:{channel_id}"
+
+        if key not in dashboard:
+            dashboard[key] = {
+                "date": add_date,
+                "channel_id": channel_id,
+                "channel_name": channel_name,
+                "new_adds": 0
+            }
+
+        dashboard[key]["new_adds"] += 1
+
+    return jsonify({
+        "total_days_oa_rows": len(dashboard),
+        "total_new_adds": len(CALL_LEADS),
+        "daily_adds": list(dashboard.values())
+    })
+
+# ================= TODAY DASHBOARD =================
+
+@app.route("/dashboard/today", methods=["GET"])
+def dashboard_today():
+
+    today = today_str()
+    by_oa = {}
+    total_today = 0
+
+    for lead in CALL_LEADS.values():
+        if lead.get("add_date") == today:
+            total_today += 1
+
+            channel_id = lead.get("channel_id")
+            channel_name = lead.get("channel_name", "UNKNOWN_OA")
+
+            if channel_id not in by_oa:
+                by_oa[channel_id] = {
+                    "channel_id": channel_id,
+                    "channel_name": channel_name,
+                    "new_adds_today": 0
+                }
+
+            by_oa[channel_id]["new_adds_today"] += 1
+
+    return jsonify({
+        "date": today,
+        "total_new_adds_today": total_today,
+        "by_oa": list(by_oa.values())
     })
 
 # ================= SEND SMS =================
@@ -72,7 +142,7 @@ def line_webhook():
 
     print("========== LINE WEBHOOK ==========", flush=True)
     print("CHANNEL NAME:", channel_name, flush=True)
-    print("DESTINATION / CHANNEL ID:", destination, flush=True)
+    print("CHANNEL ID:", destination, flush=True)
 
     events = data.get("events", [])
 
@@ -82,71 +152,83 @@ def line_webhook():
         source = event.get("source", {})
         user_id = source.get("userId", "UNKNOWN_USER")
         source_type = source.get("type", "UNKNOWN_SOURCE")
-        timestamp = datetime.now().isoformat()
+        timestamp = now_iso()
 
         print("---------- EVENT ----------", flush=True)
         print("CHANNEL NAME:", channel_name, flush=True)
-        print("CHANNEL ID:", destination, flush=True)
         print("EVENT TYPE:", event_type, flush=True)
-        print("SOURCE TYPE:", source_type, flush=True)
         print("USER ID:", user_id, flush=True)
 
-        if user_id != "UNKNOWN_USER":
+        lead_key = f"{destination}:{user_id}"
 
-            crm_key = f"{destination}:{user_id}"
+        # ===== NEW ADD / FOLLOW EVENT =====
 
-            if crm_key not in CRM_USERS:
-                CRM_USERS[crm_key] = {
-                    "crm_key": crm_key,
+        if event_type == "follow" and user_id != "UNKNOWN_USER":
+
+            if lead_key not in CALL_LEADS:
+                CALL_LEADS[lead_key] = {
+                    "lead_key": lead_key,
                     "user_id": user_id,
                     "channel_id": destination,
                     "channel_name": channel_name,
                     "source_type": source_type,
-                    "first_seen": timestamp,
+                    "lead_status": "new_lead",
+                    "follow_status": "followed",
+                    "add_date": today_str(),
+                    "added_at": timestamp,
                     "last_seen": timestamp,
-                    "follow_status": "unknown",
                     "message_count": 0,
                     "last_message": ""
                 }
 
-            CRM_USERS[crm_key]["last_seen"] = timestamp
-            CRM_USERS[crm_key]["last_event_type"] = event_type
+                print("NEW CALL LEAD ADDED:", lead_key, flush=True)
 
-        if event_type == "follow":
+            else:
+                CALL_LEADS[lead_key]["follow_status"] = "followed"
+                CALL_LEADS[lead_key]["last_seen"] = timestamp
 
-            print("NEW FOLLOW:", user_id, flush=True)
+                print("EXISTING LEAD FOLLOWED AGAIN:", lead_key, flush=True)
 
-            if user_id != "UNKNOWN_USER":
-                CRM_USERS[crm_key]["follow_status"] = "followed"
+        # ===== UNFOLLOW =====
 
-        elif event_type == "unfollow":
+        elif event_type == "unfollow" and user_id != "UNKNOWN_USER":
 
-            print("UNFOLLOW:", user_id, flush=True)
+            if lead_key in CALL_LEADS:
+                CALL_LEADS[lead_key]["follow_status"] = "unfollowed"
+                CALL_LEADS[lead_key]["last_seen"] = timestamp
 
-            if user_id != "UNKNOWN_USER":
-                CRM_USERS[crm_key]["follow_status"] = "unfollowed"
+            print("UNFOLLOW:", lead_key, flush=True)
 
-        elif event_type == "message":
+        # ===== MESSAGE =====
+
+        elif event_type == "message" and user_id != "UNKNOWN_USER":
 
             message = event.get("message", {})
             message_type = message.get("type", "UNKNOWN_MESSAGE_TYPE")
             text = message.get("text", "")
 
-            print("MESSAGE FROM:", user_id, flush=True)
-            print("MESSAGE TYPE:", message_type, flush=True)
-            print("MESSAGE TEXT:", text, flush=True)
+            MESSAGE_LOG.append({
+                "channel_id": destination,
+                "channel_name": channel_name,
+                "user_id": user_id,
+                "message_type": message_type,
+                "text": text,
+                "created_at": timestamp
+            })
 
-            if user_id != "UNKNOWN_USER":
-                CRM_USERS[crm_key]["message_count"] += 1
-                CRM_USERS[crm_key]["last_message"] = text
-                CRM_USERS[crm_key]["last_message_type"] = message_type
+            if lead_key in CALL_LEADS:
+                CALL_LEADS[lead_key]["message_count"] += 1
+                CALL_LEADS[lead_key]["last_message"] = text
+                CALL_LEADS[lead_key]["last_seen"] = timestamp
+
+            print("MESSAGE TEXT:", text, flush=True)
 
     return jsonify({
         "status": "ok",
         "channel_name": channel_name,
         "destination": destination,
         "events_received": len(events),
-        "crm_users_total": len(CRM_USERS)
+        "total_call_leads": len(CALL_LEADS)
     })
 
 # ================= RUN =================
