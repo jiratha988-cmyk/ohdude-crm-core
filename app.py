@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, redirect
+from flask import Flask, request, jsonify
 import json
 import os
 
@@ -24,10 +24,10 @@ def health():
 @app.route("/send-sms", methods=["POST"])
 def send_sms():
 
-    data = request.json
+    data = request.get_json(silent=True) or {}
 
-    print("SEND SMS REQUEST")
-    print(json.dumps(data, indent=2, ensure_ascii=False))
+    print("========== SEND SMS REQUEST ==========")
+    print(json.dumps(data, indent=2, ensure_ascii=False), flush=True)
 
     return jsonify({
         "success": True,
@@ -39,43 +39,58 @@ def send_sms():
 @app.route("/line-webhook", methods=["POST"])
 def line_webhook():
 
-    data = request.json
+    data = request.get_json(silent=True) or {}
 
-    print("========== LINE WEBHOOK ==========")
-    print(json.dumps(data, indent=2, ensure_ascii=False))
+    # LINE OA Channel ID
+    destination = data.get("destination", "UNKNOWN_DESTINATION")
+
+    print("========== LINE WEBHOOK ==========", flush=True)
+    print("DESTINATION / CHANNEL ID:", destination, flush=True)
+    print(json.dumps(data, indent=2, ensure_ascii=False), flush=True)
 
     events = data.get("events", [])
 
     for event in events:
 
         event_type = event.get("type")
+        source = event.get("source", {})
+        user_id = source.get("userId", "UNKNOWN_USER")
+        source_type = source.get("type", "UNKNOWN_SOURCE")
+
+        print("---------- EVENT ----------", flush=True)
+        print("CHANNEL ID:", destination, flush=True)
+        print("EVENT TYPE:", event_type, flush=True)
+        print("SOURCE TYPE:", source_type, flush=True)
+        print("USER ID:", user_id, flush=True)
 
         # ===== FOLLOW =====
 
         if event_type == "follow":
 
-            user_id = event.get("source", {}).get("userId")
-
-            print("NEW FOLLOW:", user_id)
+            print("NEW FOLLOW:", user_id, flush=True)
 
         # ===== UNFOLLOW =====
 
         elif event_type == "unfollow":
 
-            user_id = event.get("source", {}).get("userId")
-
-            print("UNFOLLOW:", user_id)
+            print("UNFOLLOW:", user_id, flush=True)
 
         # ===== MESSAGE =====
 
         elif event_type == "message":
 
-            user_id = event.get("source", {}).get("userId")
+            message = event.get("message", {})
+            message_type = message.get("type", "UNKNOWN_MESSAGE_TYPE")
+            text = message.get("text", "")
 
-            print("MESSAGE FROM:", user_id)
+            print("MESSAGE FROM:", user_id, flush=True)
+            print("MESSAGE TYPE:", message_type, flush=True)
+            print("MESSAGE TEXT:", text, flush=True)
 
     return jsonify({
-        "status": "ok"
+        "status": "ok",
+        "destination": destination,
+        "events_received": len(events)
     })
 
 # ================= RUN =================
