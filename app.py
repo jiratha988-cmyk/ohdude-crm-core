@@ -1,9 +1,14 @@
 from flask import Flask, request, jsonify
 import json
 import os
+import requests
 from datetime import datetime, date
 
 app = Flask(__name__)
+
+# ================= CONFIG =================
+
+GOOGLE_SCRIPT_URL = os.environ.get("GOOGLE_SCRIPT_URL")
 
 # ================= OA MAP =================
 
@@ -17,10 +22,9 @@ OA_MAP = {
     "Uc52c930ca257b5ef418c74874fecc5de": "OH DUDE"
 }
 
-# ================= TEMP MEMORY =================
+# ================= MEMORY =================
 
 CALL_LEADS = {}
-MESSAGE_LOG = []
 
 # ================= HELPERS =================
 
@@ -30,104 +34,85 @@ def now_iso():
 def today_str():
     return date.today().isoformat()
 
+# ================= GOOGLE SHEET PUSH =================
+
+def push_lead_to_google_sheet(lead_data):
+
+    if not GOOGLE_SCRIPT_URL:
+        print("GOOGLE_SCRIPT_URL NOT FOUND", flush=True)
+        return
+
+    try:
+
+        response = requests.post(
+            GOOGLE_SCRIPT_URL,
+            json=lead_data,
+            timeout=10
+        )
+
+        print("GOOGLE SHEET STATUS:", response.status_code, flush=True)
+        print("GOOGLE SHEET RESPONSE:", response.text, flush=True)
+
+    except Exception as e:
+        print("GOOGLE SHEET ERROR:", str(e), flush=True)
+
 # ================= HOME =================
 
 @app.route("/")
 def home():
     return "OhDude CRM Core Running!"
 
-# ================= HEALTH CHECK =================
+# ================= HEALTH =================
 
 @app.route("/health")
 def health():
     return jsonify({
-        "status": "ok",
-        "service": "ohdude-crm-core"
+        "status": "ok"
     })
 
 # ================= CALL LEADS =================
 
-@app.route("/call-leads", methods=["GET"])
+@app.route("/call-leads")
 def call_leads():
+
     return jsonify({
         "total_leads": len(CALL_LEADS),
         "leads": list(CALL_LEADS.values())
     })
 
-# ================= DAILY ADDS DASHBOARD =================
+# ================= DASHBOARD TODAY =================
 
-@app.route("/dashboard/daily-adds", methods=["GET"])
-def daily_adds():
-
-    dashboard = {}
-
-    for lead in CALL_LEADS.values():
-        add_date = lead.get("add_date")
-        channel_id = lead.get("channel_id")
-        channel_name = lead.get("channel_name", "UNKNOWN_OA")
-
-        key = f"{add_date}:{channel_id}"
-
-        if key not in dashboard:
-            dashboard[key] = {
-                "date": add_date,
-                "channel_id": channel_id,
-                "channel_name": channel_name,
-                "new_adds": 0
-            }
-
-        dashboard[key]["new_adds"] += 1
-
-    return jsonify({
-        "total_days_oa_rows": len(dashboard),
-        "total_new_adds": len(CALL_LEADS),
-        "daily_adds": list(dashboard.values())
-    })
-
-# ================= TODAY DASHBOARD =================
-
-@app.route("/dashboard/today", methods=["GET"])
+@app.route("/dashboard/today")
 def dashboard_today():
 
     today = today_str()
-    by_oa = {}
-    total_today = 0
+
+    result = {}
+
+    total = 0
 
     for lead in CALL_LEADS.values():
-        if lead.get("add_date") == today:
-            total_today += 1
 
-            channel_id = lead.get("channel_id")
-            channel_name = lead.get("channel_name", "UNKNOWN_OA")
+        if lead.get("add_date") != today:
+            continue
 
-            if channel_id not in by_oa:
-                by_oa[channel_id] = {
-                    "channel_id": channel_id,
-                    "channel_name": channel_name,
-                    "new_adds_today": 0
-                }
+        total += 1
 
-            by_oa[channel_id]["new_adds_today"] += 1
+        channel_id = lead.get("channel_id")
+        channel_name = lead.get("channel_name")
+
+        if channel_id not in result:
+            result[channel_id] = {
+                "channel_name": channel_name,
+                "new_adds_today": 0
+            }
+
+        result[channel_id]["new_adds_today"] += 1
 
     return jsonify({
         "date": today,
-        "total_new_adds_today": total_today,
-        "by_oa": list(by_oa.values())
-    })
-
-# ================= SEND SMS =================
-
-@app.route("/send-sms", methods=["POST"])
-def send_sms():
-
-    data = request.get_json(silent=True) or {}
-
-    print("========== SEND SMS REQUEST ==========", flush=True)
-    print(json.dumps(data, indent=2, ensure_ascii=False), flush=True)
-
-    return jsonify({
-        "success": True,
-        "message": "SMS API READY"
+        "total_new_adds_today": total,
+        "by_oa": result
     })
 
 # ================= LINE WEBHOOK =================
@@ -142,97 +127,80 @@ def line_webhook():
 
     print("========== LINE WEBHOOK ==========", flush=True)
     print("CHANNEL NAME:", channel_name, flush=True)
-    print("CHANNEL ID:", destination, flush=True)
 
     events = data.get("events", [])
 
     for event in events:
 
         event_type = event.get("type")
-        source = event.get("source", {})
-        user_id = source.get("userId", "UNKNOWN_USER")
-        source_type = source.get("type", "UNKNOWN_SOURCE")
-        timestamp = now_iso()
 
-        print("---------- EVENT ----------", flush=True)
-        print("CHANNEL NAME:", channel_name, flush=True)
-        print("EVENT TYPE:", event_type, flush=True)
-        print("USER ID:", user_id, flush=True)
+        source = event.get("source", {})
+
+        user_id = source.get("userId", "UNKNOWN_USER")
 
         lead_key = f"{destination}:{user_id}"
 
-        # ===== NEW ADD / FOLLOW EVENT =====
+        print("EVENT TYPE:", event_type, flush=True)
+        print("USER ID:", user_id, flush=True)
 
-        if event_type == "follow" and user_id != "UNKNOWN_USER":
+        # ================= FOLLOW EVENT =================
 
-            if lead_key not in CALL_LEADS:
-                CALL_LEADS[lead_key] = {
-                    "lead_key": lead_key,
-                    "user_id": user_id,
-                    "channel_id": destination,
-                    "channel_name": channel_name,
-                    "source_type": source_type,
-                    "lead_status": "new_lead",
-                    "follow_status": "followed",
-                    "add_date": today_str(),
-                    "added_at": timestamp,
-                    "last_seen": timestamp,
-                    "message_count": 0,
-                    "last_message": ""
-                }
+        if event_type == "follow":
 
-                print("NEW CALL LEAD ADDED:", lead_key, flush=True)
+            timestamp = now_iso()
 
-            else:
-                CALL_LEADS[lead_key]["follow_status"] = "followed"
-                CALL_LEADS[lead_key]["last_seen"] = timestamp
+            lead_data = {
+                "lead_key": lead_key,
+                "user_id": user_id,
+                "channel_id": destination,
+                "channel_name": channel_name,
+                "follow_status": "followed",
+                "lead_status": "new_lead",
+                "add_date": today_str(),
+                "added_at": timestamp
+            }
 
-                print("EXISTING LEAD FOLLOWED AGAIN:", lead_key, flush=True)
+            CALL_LEADS[lead_key] = lead_data
 
-        # ===== UNFOLLOW =====
+            print("NEW LEAD SAVED", flush=True)
 
-        elif event_type == "unfollow" and user_id != "UNKNOWN_USER":
+            # PUSH TO GOOGLE SHEET
+            push_lead_to_google_sheet(lead_data)
+
+        # ================= UNFOLLOW =================
+
+        elif event_type == "unfollow":
 
             if lead_key in CALL_LEADS:
                 CALL_LEADS[lead_key]["follow_status"] = "unfollowed"
-                CALL_LEADS[lead_key]["last_seen"] = timestamp
 
-            print("UNFOLLOW:", lead_key, flush=True)
+            print("UNFOLLOW:", user_id, flush=True)
 
-        # ===== MESSAGE =====
+        # ================= MESSAGE =================
 
-        elif event_type == "message" and user_id != "UNKNOWN_USER":
+        elif event_type == "message":
 
             message = event.get("message", {})
-            message_type = message.get("type", "UNKNOWN_MESSAGE_TYPE")
+
             text = message.get("text", "")
 
-            MESSAGE_LOG.append({
-                "channel_id": destination,
-                "channel_name": channel_name,
-                "user_id": user_id,
-                "message_type": message_type,
-                "text": text,
-                "created_at": timestamp
-            })
+            print("MESSAGE:", text, flush=True)
 
             if lead_key in CALL_LEADS:
-                CALL_LEADS[lead_key]["message_count"] += 1
                 CALL_LEADS[lead_key]["last_message"] = text
-                CALL_LEADS[lead_key]["last_seen"] = timestamp
-
-            print("MESSAGE TEXT:", text, flush=True)
 
     return jsonify({
         "status": "ok",
-        "channel_name": channel_name,
-        "destination": destination,
-        "events_received": len(events),
-        "total_call_leads": len(CALL_LEADS)
+        "channel_name": channel_name
     })
 
 # ================= RUN =================
 
 if __name__ == "__main__":
+
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
