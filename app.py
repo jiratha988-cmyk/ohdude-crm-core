@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import json
 import os
+from datetime import datetime
 
 app = Flask(__name__)
 
@@ -16,6 +17,10 @@ OA_MAP = {
     "Uc52c930ca257b5ef418c74874fecc5de": "OH DUDE"
 }
 
+# ================= TEMP CRM MEMORY =================
+
+CRM_USERS = {}
+
 # ================= HOME =================
 
 @app.route("/")
@@ -29,6 +34,15 @@ def health():
     return jsonify({
         "status": "ok",
         "service": "ohdude-crm-core"
+    })
+
+# ================= CRM USERS =================
+
+@app.route("/crm/users", methods=["GET"])
+def crm_users():
+    return jsonify({
+        "total_users": len(CRM_USERS),
+        "users": list(CRM_USERS.values())
     })
 
 # ================= SEND SMS =================
@@ -59,7 +73,6 @@ def line_webhook():
     print("========== LINE WEBHOOK ==========", flush=True)
     print("CHANNEL NAME:", channel_name, flush=True)
     print("DESTINATION / CHANNEL ID:", destination, flush=True)
-    print(json.dumps(data, indent=2, ensure_ascii=False), flush=True)
 
     events = data.get("events", [])
 
@@ -69,6 +82,7 @@ def line_webhook():
         source = event.get("source", {})
         user_id = source.get("userId", "UNKNOWN_USER")
         source_type = source.get("type", "UNKNOWN_SOURCE")
+        timestamp = datetime.now().isoformat()
 
         print("---------- EVENT ----------", flush=True)
         print("CHANNEL NAME:", channel_name, flush=True)
@@ -77,13 +91,40 @@ def line_webhook():
         print("SOURCE TYPE:", source_type, flush=True)
         print("USER ID:", user_id, flush=True)
 
+        if user_id != "UNKNOWN_USER":
+
+            crm_key = f"{destination}:{user_id}"
+
+            if crm_key not in CRM_USERS:
+                CRM_USERS[crm_key] = {
+                    "crm_key": crm_key,
+                    "user_id": user_id,
+                    "channel_id": destination,
+                    "channel_name": channel_name,
+                    "source_type": source_type,
+                    "first_seen": timestamp,
+                    "last_seen": timestamp,
+                    "follow_status": "unknown",
+                    "message_count": 0,
+                    "last_message": ""
+                }
+
+            CRM_USERS[crm_key]["last_seen"] = timestamp
+            CRM_USERS[crm_key]["last_event_type"] = event_type
+
         if event_type == "follow":
 
             print("NEW FOLLOW:", user_id, flush=True)
 
+            if user_id != "UNKNOWN_USER":
+                CRM_USERS[crm_key]["follow_status"] = "followed"
+
         elif event_type == "unfollow":
 
             print("UNFOLLOW:", user_id, flush=True)
+
+            if user_id != "UNKNOWN_USER":
+                CRM_USERS[crm_key]["follow_status"] = "unfollowed"
 
         elif event_type == "message":
 
@@ -95,11 +136,17 @@ def line_webhook():
             print("MESSAGE TYPE:", message_type, flush=True)
             print("MESSAGE TEXT:", text, flush=True)
 
+            if user_id != "UNKNOWN_USER":
+                CRM_USERS[crm_key]["message_count"] += 1
+                CRM_USERS[crm_key]["last_message"] = text
+                CRM_USERS[crm_key]["last_message_type"] = message_type
+
     return jsonify({
         "status": "ok",
         "channel_name": channel_name,
         "destination": destination,
-        "events_received": len(events)
+        "events_received": len(events),
+        "crm_users_total": len(CRM_USERS)
     })
 
 # ================= RUN =================
